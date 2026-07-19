@@ -1,0 +1,1555 @@
+diff --git a/node_modules/react-native-litert-lm/.DS_Store b/node_modules/react-native-litert-lm/.DS_Store
+new file mode 100644
+index 0000000..2de4afb
+Binary files /dev/null and b/node_modules/react-native-litert-lm/.DS_Store differ
+diff --git a/node_modules/react-native-litert-lm/app.plugin.js b/node_modules/react-native-litert-lm/app.plugin.js
+new file mode 100644
+index 0000000..3d61fa2
+--- /dev/null
++++ b/node_modules/react-native-litert-lm/app.plugin.js
+@@ -0,0 +1,8 @@
++// Expo config plugin stub for react-native-litert-lm.
++// The package itself doesn't need to modify native configuration;
++// this file exists solely to prevent Expo from falling back to lib/index.js
++// (which uses ESM syntax incompatible with Expo's CJS plugin loader).
++/** @type {import('@expo/config-plugins').ConfigPlugin} */
++const withLiteRTLM = (config) => config;
++
++module.exports = withLiteRTLM;
+diff --git a/node_modules/react-native-litert-lm/cpp/HybridLiteRTLM.cpp b/node_modules/react-native-litert-lm/cpp/HybridLiteRTLM.cpp
+index 30125e0..36e9372 100644
+--- a/node_modules/react-native-litert-lm/cpp/HybridLiteRTLM.cpp
++++ b/node_modules/react-native-litert-lm/cpp/HybridLiteRTLM.cpp
+@@ -1,483 +1,245 @@
+-//
+ // HybridLiteRTLM.cpp
+ // react-native-litert-lm
+ //
+-// High-performance LLM inference using LiteRT-LM.
+-//
+-// NOTE: This C++ implementation is used for iOS ONLY.
+-// Android uses the Kotlin implementation in `android/src/main/java/com/margelo/nitro/dev/litert/litertlm/HybridLiteRTLM.kt`.
+-// Do not assume changes here will affect Android.
++// iOS implementation that delegates to LiteRTLMBridge (Swift/LiteRT-LM SDK).
++// Android uses the Kotlin implementation.
+ //
+ 
+ #include "HybridLiteRTLM.hpp"
+ 
+-#define STB_IMAGE_IMPLEMENTATION
+-#include "include/stb_image.h"
+-
+-#include <chrono>
+ #include <stdexcept>
+ #include <sstream>
+-#include <fstream>
+-
+-namespace margelo::nitro::litertlm {
+-
+-//------------------------------------------------------------------------------
+-// Helper: Format user prompt (applies chat template if needed)
+-//------------------------------------------------------------------------------
+-std::string HybridLiteRTLM::formatUserPrompt(const std::string& message) const {
+-  // The LiteRT-LM Conversation class handles chat templates internally,
+-  // so we just return the message as-is. If we were using Session directly,
+-  // we'd apply the Gemma/Phi template here.
+-  return message;
+-}
+-
+-//------------------------------------------------------------------------------
+-// Helper: Create a new Conversation from existing Engine
+-//------------------------------------------------------------------------------
+-void HybridLiteRTLM::createNewConversation() {
+-#ifdef LITERT_LM_ENABLED
+-  if (!engine_) {
+-    throw std::runtime_error("Cannot create conversation: engine not initialized");
+-  }
+-  
+-  auto conversation_config = litert::lm::ConversationConfig::CreateDefault(*engine_);
+-  if (!conversation_config.ok()) {
+-    throw std::runtime_error("Failed to create conversation config: " + 
+-        std::string(conversation_config.status().message()));
+-  }
+ 
+-  auto conversation = litert::lm::Conversation::Create(*engine_, *conversation_config);
+-  if (!conversation.ok()) {
+-    throw std::runtime_error("Failed to create conversation: " + 
+-        std::string(conversation.status().message()));
+-  }
+-  conversation_ = std::move(*conversation);
++// Import the ObjC bridge header only on Apple platforms.
++// The bridge is defined in LiteRTLMBridge.swift (compiled into the NanoChat target).
++#ifdef __APPLE__
++// Forward-declare the Objective-C interface to avoid including Swift-generated headers
++// directly in C++ (which causes clashes). We call via objc_msgSend-compatible stubs
++// declared in the header, or — more simply — through a thin .mm wrapper.
++// Instead, we delegate via the HybridLiteRTLMBridge.mm companion file.
++#include "HybridLiteRTLMBridge.h"
+ #endif
+-}
++
++namespace margelo::nitro::litertlm {
+ 
+ //------------------------------------------------------------------------------
+-// loadModel - Initialize Engine and Conversation
++// loadModel — delegate to Swift bridge
+ //------------------------------------------------------------------------------
+-void HybridLiteRTLM::loadModel(
++std::shared_ptr<Promise<void>> HybridLiteRTLM::loadModel(
+     const std::string& modelPath,
+     const std::optional<LLMConfig>& config) {
+ 
+-  std::lock_guard<std::mutex> lock(mutex_);
+-  
+-  // Clean up existing resources
+-  if (isLoaded_) {
+-    isLoaded_ = false;
+-    history_.clear();
+-#ifdef LITERT_LM_ENABLED
+-    conversation_.reset();
+-    engine_.reset();
+-#endif
+-  }
+-  
+-  // Apply configuration
+   if (config.has_value()) {
+-    if (config->backend.has_value()) {
+-      backend_ = config->backend.value();
+-    }
+-    if (config->visionBackend.has_value()) {
+-      visionBackend_ = config->visionBackend.value();
+-    }
+-    if (config->audioBackend.has_value()) {
+-      audioBackend_ = config->audioBackend.value();
+-    }
+-    if (config->temperature.has_value()) {
+-      temperature_ = config->temperature.value();
+-    }
+-    if (config->topK.has_value()) {
+-      topK_ = config->topK.value();
+-    }
+-    if (config->topP.has_value()) {
+-      topP_ = config->topP.value();
+-    }
+-    if (config->maxTokens.has_value()) {
+-      maxTokens_ = config->maxTokens.value();
+-    }
+-  }
+-  
+-#ifdef LITERT_LM_ENABLED
+-  // 1. Create ModelAssets from model path
+-  auto model_assets = litert::lm::ModelAssets::Create(modelPath);
+-  if (!model_assets.ok()) {
+-    throw std::runtime_error("Failed to load model assets: " + 
+-        std::string(model_assets.status().message()));
++    std::lock_guard<std::mutex> lock(mutex_);
++    if (config->backend.has_value())     backend_     = config->backend.value();
++    if (config->temperature.has_value()) temperature_ = config->temperature.value();
++    if (config->topK.has_value())        topK_        = config->topK.value();
++    if (config->topP.has_value())        topP_        = config->topP.value();
++    if (config->maxTokens.has_value())   maxTokens_   = config->maxTokens.value();
++    if (config->systemPrompt.has_value()) systemPrompt_ = config->systemPrompt.value();
+   }
+ 
+-  // 2. Map our Backend enum to LiteRT-LM Backend enum
+-  auto engine_backend = (backend_ == Backend::GPU) 
+-    ? litert::lm::Backend::GPU 
+-    : litert::lm::Backend::CPU;
+-  auto vision_backend = (visionBackend_ == Backend::GPU)
+-    ? litert::lm::Backend::GPU 
+-    : litert::lm::Backend::CPU;
+-  auto audio_backend = (audioBackend_ == Backend::GPU)
+-    ? litert::lm::Backend::GPU 
+-    : litert::lm::Backend::CPU;
+-
+-  // 3. Create EngineSettings with all backends
+-  auto engine_settings = litert::lm::EngineSettings::CreateDefault(
+-    *model_assets, 
+-    engine_backend,
+-    vision_backend,
+-    audio_backend
+-  );
++  bool useGPU = (backend_ == Backend::GPU);
++  std::string path = modelPath;
+ 
+-  // 4. Create the Engine (heavyweight - loads model weights)
+-  auto engine = litert::lm::Engine::CreateEngine(engine_settings);
+-  if (!engine.ok()) {
+-    throw std::runtime_error("Failed to create engine: " + 
+-        std::string(engine.status().message()));
+-  }
+-  engine_ = std::move(*engine);
++  return Promise<void>::async([this, path, useGPU]() {
++    // LiteRTLMBridgeLoadModel is synchronous — it blocks until the Swift bridge
++    // finishes loading (internally uses DispatchSemaphore).
++    __block NSString* errNS = nil;
++    __block dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+ 
+-  // 5. Create the Conversation (lightweight - holds KV cache)
+-  createNewConversation();
++    LiteRTLMBridgeLoadModel(path.c_str(), useGPU, ^(const char* err) {
++      if (err) errNS = [NSString stringWithUTF8String:err];
++      dispatch_semaphore_signal(sem);
++    });
+ 
+-#endif // LITERT_LM_ENABLED
++    dispatch_semaphore_wait(sem, DISPATCH_TIME_FOREVER);
+ 
+-  isLoaded_ = true;
+-  history_.clear();
++    if (errNS) {
++      throw std::runtime_error("loadModel failed: " + std::string(errNS.UTF8String));
++    }
+ 
+-  // Reset stats
+-  lastStats_ = GenerationStats{0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
++    std::lock_guard<std::mutex> lock(mutex_);
++    isLoaded_ = true;
++    history_.clear();
++  });
+ }
+ 
+ //------------------------------------------------------------------------------
+-// sendMessage - Blocking text inference
++// sendMessage — blocking, delegate to bridge
+ //------------------------------------------------------------------------------
+-std::string HybridLiteRTLM::sendMessage(const std::string& message) {
+-  std::lock_guard<std::mutex> lock(mutex_);
+-  ensureLoaded();
+-  
+-  auto startTime = std::chrono::high_resolution_clock::now();
+-  
+-  // Add user message to history
+-  Message userMessage;
+-  userMessage.role = Role::USER;
+-  userMessage.content = message;
+-  history_.push_back(userMessage);
+-  
+-  std::string responseText;
+-  
+-#ifdef LITERT_LM_ENABLED
+-  // Build the message struct for LiteRT-LM
+-  // The Conversation API expects a structured input
+-  litert::lm::UserMessage lm_message;
+-  lm_message.role = "user";
+-  lm_message.content = message;
+-  
+-  auto response = conversation_->SendMessage(lm_message);
+-  if (!response.ok()) {
+-    // Remove the user message we just added since inference failed
+-    history_.pop_back();
+-    throw std::runtime_error("Inference failed: " + 
+-        std::string(response.status().message()));
+-  }
+-  
+-  responseText = response->content;
+-  
+-  // Update stats from response if available
+-  if (response->stats.has_value()) {
+-    const auto& stats = response->stats.value();
+-    lastStats_.promptTokens = static_cast<double>(stats.prompt_tokens);
+-    lastStats_.completionTokens = static_cast<double>(stats.completion_tokens);
+-    lastStats_.totalTokens = lastStats_.promptTokens + lastStats_.completionTokens;
+-    lastStats_.timeToFirstToken = stats.time_to_first_token_ms;
+-    lastStats_.totalTime = stats.total_time_ms;
+-    lastStats_.tokensPerSecond = (lastStats_.totalTime > 0) 
+-      ? lastStats_.completionTokens / (lastStats_.totalTime / 1000.0)
+-      : 0.0;
+-  }
++std::shared_ptr<Promise<std::string>> HybridLiteRTLM::sendMessage(
++    const std::string& message) {
+ 
+-#else
+-  // Stub response when LiteRT-LM is not available
+-  responseText = "[LiteRT-LM Stub] Model response placeholder. "
+-    "Real inference will be available when LiteRT-LM libraries are integrated. "
+-    "You said: " + message;
+-  
+-  auto endTime = std::chrono::high_resolution_clock::now();
+-  auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime).count();
+-  
+-  // Estimate stats for stub
+-  lastStats_.promptTokens = static_cast<double>(message.length() / 4);
+-  lastStats_.completionTokens = static_cast<double>(responseText.length() / 4);
+-  lastStats_.totalTokens = lastStats_.promptTokens + lastStats_.completionTokens;
+-  lastStats_.totalTime = static_cast<double>(duration);
+-  lastStats_.timeToFirstToken = lastStats_.totalTime / 2;
+-  lastStats_.tokensPerSecond = (lastStats_.totalTime > 0) 
+-    ? lastStats_.completionTokens / (lastStats_.totalTime / 1000.0)
+-    : 0;
+-#endif
++  return Promise<std::string>::async([this, prompt]() -> std::string {
++    {
++      std::lock_guard<std::mutex> lock(mutex_);
++      ensureLoaded();
++    }
+ 
+-  // Add model response to history
+-  Message modelMessage;
+-  modelMessage.role = Role::MODEL;
+-  modelMessage.content = responseText;
+-  history_.push_back(modelMessage);
++    // LiteRTLMBridgeSendMessage is synchronous — blocks until the bridge returns.
++    __block NSString* resultNS = nil;
++    __block NSString* errNS = nil;
++    __block dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+ 
+-  return responseText;
+-}
++    LiteRTLMBridgeSendMessage(prompt.c_str(), ^(const char* text, const char* err) {
++      if (text) resultNS = [NSString stringWithUTF8String:text];
++      if (err)  errNS    = [NSString stringWithUTF8String:err];
++      dispatch_semaphore_signal(sem);
++    });
+ 
+-//------------------------------------------------------------------------------
+-// sendMessageWithImage - Multimodal image + text
+-//------------------------------------------------------------------------------
+-std::string HybridLiteRTLM::sendMessageWithImage(
+-    const std::string& message,
+-    const std::string& imagePath) {
++    dispatch_semaphore_wait(sem, DISPATCH_TIME_FOREVER);
+ 
+-  std::lock_guard<std::mutex> lock(mutex_);
+-  ensureLoaded();
+-  
+-#ifdef LITERT_LM_ENABLED
+-  // Load image using stb_image
+-  int width, height, channels;
+-  unsigned char* img = stbi_load(imagePath.c_str(), &width, &height, &channels, 3); // Force 3 channels (RGB)
+-  if (img == nullptr) {
+-    throw std::runtime_error("Failed to load image from path: " + imagePath);
+-  }
++    if (errNS) {
++      throw std::runtime_error("sendMessage failed: " + std::string(errNS.UTF8String));
++    }
+ 
+-  // Create input tensor/buffer for the engine.
+-  // Note: The exact API for passing image data depends on the LiteRT-LM version.
+-  // Assuming a structure that accepts raw bytes and dimensions.
+-  litert::lm::UserMessage lm_message;
+-  lm_message.role = "user";
+-  
+-  // Construct multimodal content
+-  // Option A: If UserMessage supports a list of content parts
+-  litert::lm::ContentPart textPart;
+-  textPart.type = litert::lm::ContentType::TEXT;
+-  textPart.text = message;
+-  lm_message.parts.push_back(textPart);
+-
+-  litert::lm::ContentPart imagePart;
+-  imagePart.type = litert::lm::ContentType::IMAGE;
+-  imagePart.image.width = width;
+-  imagePart.image.height = height;
+-  imagePart.image.channels = channels;
+-  imagePart.image.data = std::vector<uint8_t>(img, img + (width * height * channels));
+-  lm_message.parts.push_back(imagePart);
+-  
+-  stbi_image_free(img);
+-
+-  auto response = conversation_->SendMessage(lm_message);
+-  if (!response.ok()) {
+-    throw std::runtime_error("Multimodal inference failed: " + 
+-        std::string(response.status().message()));
+-  }
++    std::string response = resultNS ? std::string(resultNS.UTF8String) : "";
+ 
+-  // Add to history (metadata only)
+-  Message userMessage;
+-  userMessage.role = Role::USER;
+-  userMessage.content = message + " [Image]"; 
+-  history_.push_back(userMessage);
+-  
+-  Message modelMessage;
+-  modelMessage.role = Role::MODEL;
+-  modelMessage.content = response->content;
+-  history_.push_back(modelMessage);
+-  
+-  return response->content;
+-  
+-#else
+-  // iOS: LiteRT-LM SDK not yet available, throw clear error
+-  throw std::runtime_error(
+-      "sendMessageWithImage is not supported on iOS. "
+-      "LiteRT-LM iOS SDK is not yet available. "
+-      "Please use text-only sendMessage() for now.");
+-#endif
++    std::lock_guard<std::mutex> lock(mutex_);
++    Message userMsg;
++    userMsg.role = Role::USER;
++    userMsg.content = prompt;
++    history_.push_back(userMsg);
++    Message modelMsg;
++    modelMsg.role = Role::MODEL;
++    modelMsg.content = response;
++    history_.push_back(modelMsg);
++
++    return response;
++  });
+ }
+ 
+-#endif
++//------------------------------------------------------------------------------
++// sendMessageWithImage — Not supported on iOS.
++//------------------------------------------------------------------------------
++std::shared_ptr<Promise<std::string>> HybridLiteRTLM::sendMessageWithImage(
++    const std::string& /* message */,
++    const std::string& /* imagePath */) {
++
++  return Promise<std::string>::rejected(
++      std::make_exception_ptr(std::runtime_error(
++          "sendMessageWithImage is not yet supported on iOS.")));
+ }
+ 
+ //------------------------------------------------------------------------------
+-// downloadModel - Download model file from URL
++// downloadModel — Not supported via this API on iOS.
+ //------------------------------------------------------------------------------
+-std::future<std::string> HybridLiteRTLM::downloadModel(
+-    const std::string& url,
+-    const std::string& fileName,
+-    const std::optional<std::function<void(double)>>& onProgress) {
+-  
+-  // Return a future that throws an exception
+-  return std::async(std::launch::async, []() -> std::string {
+-    throw std::runtime_error(
+-        "downloadModel is not supported on iOS yet. "
+-        "Please download the model manually using a separate library."
+-    );
+-  });
++std::shared_ptr<Promise<std::string>> HybridLiteRTLM::downloadModel(
++    const std::string& /* url */,
++    const std::string& /* fileName */,
++    const std::optional<std::function<void(double)>>& /* onProgress */) {
++
++  return Promise<std::string>::rejected(
++      std::make_exception_ptr(std::runtime_error(
++          "downloadModel is not supported on iOS via react-native-litert-lm. "
++          "Use expo-file-system to download models.")));
+ }
+ 
+ //------------------------------------------------------------------------------
+-// sendMessageWithAudio - Multimodal audio + text
++// deleteModel — Not supported on iOS.
+ //------------------------------------------------------------------------------
+-std::string HybridLiteRTLM::sendMessageWithAudio(
+-    const std::string& message,
+-    const std::string& audioPath) {
+-  
+-  std::lock_guard<std::mutex> lock(mutex_);
+-  ensureLoaded();
+-  
+-#ifdef LITERT_LM_ENABLED
+-  // Load audio file
+-  std::ifstream audioFile(audioPath, std::ios::binary);
+-  if (!audioFile) {
+-      throw std::runtime_error("Failed to open audio file: " + audioPath);
+-  }
+-  
+-  // Simple WAV header skip (simplistic, assuming standard header size for now or raw)
+-  // Ideally use a WAV parsing library or miniaudio if available.
+-  // For this implementation, we read the whole file.
+-  std::vector<uint8_t> audioData((std::istreambuf_iterator<char>(audioFile)), std::istreambuf_iterator<char>());
+-  
+-  litert::lm::UserMessage lm_message;
+-  lm_message.role = "user";
+-  
+-  litert::lm::ContentPart textPart;
+-  textPart.type = litert::lm::ContentType::TEXT;
+-  textPart.text = message;
+-  lm_message.parts.push_back(textPart);
+-
+-  litert::lm::ContentPart audioPart;
+-  audioPart.type = litert::lm::ContentType::AUDIO;
+-  audioPart.audio.data = audioData;
+-  // Metadata like sample rate might be needed:
+-  // audioPart.audio.sample_rate = 16000; 
+-  lm_message.parts.push_back(audioPart);
+-
+-  auto response = conversation_->SendMessage(lm_message);
+-  if (!response.ok()) {
+-    throw std::runtime_error("Audio inference failed: " + 
+-        std::string(response.status().message()));
+-  }
++std::shared_ptr<Promise<void>> HybridLiteRTLM::deleteModel(
++    const std::string& /* fileName */) {
+ 
+-  Message userMessage;
+-  userMessage.role = Role::USER;
+-  userMessage.content = message + " [Audio]";
+-  history_.push_back(userMessage);
+-  
+-  Message modelMessage;
+-  modelMessage.role = Role::MODEL;
+-  modelMessage.content = response->content;
+-  history_.push_back(modelMessage);
++  return Promise<void>::rejected(
++      std::make_exception_ptr(std::runtime_error(
++          "deleteModel is not supported on iOS.")));
++}
+ 
+-  return response->content;
++//------------------------------------------------------------------------------
++// sendMessageWithAudio — Not supported on iOS.
++//------------------------------------------------------------------------------
++std::shared_ptr<Promise<std::string>> HybridLiteRTLM::sendMessageWithAudio(
++    const std::string& /* message */,
++    const std::string& /* audioPath */) {
+ 
+-#else
+-  // iOS: LiteRT-LM SDK not yet available, throw clear error
+-  throw std::runtime_error(
+-      "sendMessageWithAudio is not supported on iOS. "
+-      "LiteRT-LM iOS SDK is not yet available. "
+-      "Please use text-only sendMessage() for now.");
+-#endif
++  return Promise<std::string>::rejected(
++      std::make_exception_ptr(std::runtime_error(
++          "sendMessageWithAudio is not yet supported on iOS.")));
+ }
+ 
+ //------------------------------------------------------------------------------
+-// sendMessageAsync - Streaming token generation
++// sendMessageAsync — Streaming via LiteRTLMBridge
+ //------------------------------------------------------------------------------
+ void HybridLiteRTLM::sendMessageAsync(
+     const std::string& message,
+-    const std::function<void(std::string, bool)>& onToken) {
+-  
+-  // Note: We don't hold the lock during the entire async operation
+-  // to avoid blocking other operations. The callback may be invoked
+-  // from a different thread depending on LiteRT-LM's implementation.
++    const std::function<void(const std::string& /* token */, bool /* done */)>& onToken) {
+ 
+   {
+     std::lock_guard<std::mutex> lock(mutex_);
+     ensureLoaded();
+   }
+ 
+-#ifdef LITERT_LM_ENABLED
+-  // Add user message to history before starting
++  std::string prompt = message;
++
++  // Add user message to history before streaming
+   {
+     std::lock_guard<std::mutex> lock(mutex_);
+-    Message userMessage;
+-    userMessage.role = Role::USER;
+-    userMessage.content = message;
+-    history_.push_back(userMessage);
++    Message userMsg;
++    userMsg.role = Role::USER;
++    userMsg.content = prompt;
++    history_.push_back(userMsg);
+   }
+ 
+-  litert::lm::UserMessage lm_message;
+-  lm_message.role = "user";
+-  lm_message.content = message;
+-  
+-  std::string fullResponse;
+-  
+-  // The callback needs to be carefully managed for thread safety
+-  auto status = conversation_->SendMessageAsync(
+-    lm_message,
+-    [this, &onToken, &fullResponse](const std::string& token, bool isDone) {
+-      fullResponse += token;
+-      
+-      // Invoke the JS callback (Nitro handles thread marshalling)
+-      onToken(token, isDone);
+-      
+-      if (isDone) {
+-        // Add complete response to history
+-        std::lock_guard<std::mutex> lock(mutex_);
+-        Message modelMessage;
+-        modelMessage.role = Role::MODEL;
+-        modelMessage.content = fullResponse;
+-        history_.push_back(modelMessage);
++  // Capture onToken for use in ObjC block.
++  // ObjC blocks can't mutate captured C++ objects directly — use shared_ptr wrappers
++  // so the block holds a pointer it can freely dereference and modify.
++  auto spFullResponse  = std::make_shared<std::string>();
++  auto spTokenCallback = std::make_shared<std::function<void(const std::string&, bool)>>(onToken);
++
++  __block bool done = false;
++  __block std::string errorMsg;
++
++  // Capture raw pointers from shared_ptrs for the block.
++  // Lifetime is safe: we block below until done == true.
++  std::string* pFullResponse  = spFullResponse.get();
++  auto*        pTokenCallback = spTokenCallback.get();
++
++  LiteRTLMBridgeSendMessageAsync(
++    prompt.c_str(),
++    ^(const char* token) {
++      // Called for each streamed token
++      if (token && token[0] != '\0') {
++        *pFullResponse += token;
++        (*pTokenCallback)(std::string(token), false);
+       }
++    },
++    ^(const char* err) {
++      // Called when streaming completes (err is null on success)
++      if (err) errorMsg = std::string(err);
++      done = true;
+     }
+   );
+ 
+-  if (!status.ok()) {
+-    // Remove user message since inference failed
+-    std::lock_guard<std::mutex> lock(mutex_);
+-    if (!history_.empty()) {
+-      history_.pop_back();
+-    }
+-    throw std::runtime_error("Async inference failed: " + 
+-        std::string(status.message()));
++  // Spin-wait for streaming to complete.
++  // The bridge internally blocks its DispatchQueue via DispatchSemaphore,
++  // but token callbacks fire synchronously before done=true.
++  while (!done) {
++    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+   }
+ 
+-#else
+-  // Stub: Simulate streaming by calling sendMessage and splitting response
+-  std::string fullResponse;
+-  {
+-    std::lock_guard<std::mutex> lock(mutex_);
+-    
+-    // Add user message
+-    Message userMessage;
+-    userMessage.role = Role::USER;
+-    userMessage.content = message;
+-    history_.push_back(userMessage);
+-    
+-    fullResponse = "[LiteRT-LM Stub] Streaming response placeholder. You said: " + message;
+-  }
+ 
+-  // Simulate token-by-token streaming
+-  std::string currentWord;
+-  for (size_t i = 0; i < fullResponse.length(); i++) {
+-    char c = fullResponse[i];
+-    currentWord += c;
+-    
+-    if (c == ' ' || c == '\n' || i == fullResponse.length() - 1) {
+-      bool isDone = (i == fullResponse.length() - 1);
+-      onToken(currentWord, isDone);
+-      currentWord.clear();
+-    }
+-  }
++  // Signal end of stream to JS
++  if (errorMsg.empty()) {
++    (*pTokenCallback)("", true);  // done signal
+ 
+-  // Add model response to history
+-  {
+     std::lock_guard<std::mutex> lock(mutex_);
+-    Message modelMessage;
+-    modelMessage.role = Role::MODEL;
+-    modelMessage.content = fullResponse;
+-    history_.push_back(modelMessage);
++    Message modelMsg;
++    modelMsg.role = Role::MODEL;
++    modelMsg.content = *spFullResponse;
++    history_.push_back(modelMsg);
++  } else {
++    // Signal done even on error so UI can recover
++    (*pTokenCallback)("", true);
++    // Remove the user message we added since generation failed
++    std::lock_guard<std::mutex> lock(mutex_);
++    if (!history_.empty()) history_.pop_back();
+   }
+-#endif
+ }
+ 
+ //------------------------------------------------------------------------------
+-// getHistory - Return conversation history
++// getHistory
+ //------------------------------------------------------------------------------
+ std::vector<Message> HybridLiteRTLM::getHistory() {
+   std::lock_guard<std::mutex> lock(mutex_);
+@@ -485,33 +247,24 @@ std::vector<Message> HybridLiteRTLM::getHistory() {
+ }
+ 
+ //------------------------------------------------------------------------------
+-// resetConversation - Clear KV cache, keep engine
++// resetConversation
+ //------------------------------------------------------------------------------
+ void HybridLiteRTLM::resetConversation() {
+   std::lock_guard<std::mutex> lock(mutex_);
+-  
+-#ifdef LITERT_LM_ENABLED
+-  // Destroy old conversation and create a new one
+-  // This clears the KV cache but keeps the (expensive) Engine loaded
+-  if (engine_) {
+-    conversation_.reset();
+-    createNewConversation();
+-  }
+-#endif
+-  
+   history_.clear();
++  LiteRTLMBridgeResetConversation();
+ }
+ 
+ //------------------------------------------------------------------------------
+-// isReady - Check if model is loaded
++// isReady
+ //------------------------------------------------------------------------------
+ bool HybridLiteRTLM::isReady() {
+   std::lock_guard<std::mutex> lock(mutex_);
+-  return isLoaded_;
++  return isLoaded_ && LiteRTLMBridgeIsReady();
+ }
+ 
+ //------------------------------------------------------------------------------
+-// getStats - Return last generation statistics
++// getStats
+ //------------------------------------------------------------------------------
+ GenerationStats HybridLiteRTLM::getStats() {
+   std::lock_guard<std::mutex> lock(mutex_);
+@@ -519,7 +272,7 @@ GenerationStats HybridLiteRTLM::getStats() {
+ }
+ 
+ //------------------------------------------------------------------------------
+-// getMemoryUsage - Return real memory usage from OS
++// getMemoryUsage — Real OS-level memory query on Apple platforms.
+ //------------------------------------------------------------------------------
+ MemoryUsage HybridLiteRTLM::getMemoryUsage() {
+   double nativeHeapBytes = 0;
+@@ -528,89 +281,38 @@ MemoryUsage HybridLiteRTLM::getMemoryUsage() {
+   bool isLowMemory = false;
+ 
+ #ifdef __APPLE__
+-  // Get process memory info via Mach APIs
+   struct mach_task_basic_info taskInfo;
+   mach_msg_type_number_t infoCount = MACH_TASK_BASIC_INFO_COUNT;
+   if (task_info(mach_task_self(), MACH_TASK_BASIC_INFO,
+-                (task_info_t)&taskInfo, &infoCount) == KERN_SUCCESS) {
++                reinterpret_cast<task_info_t>(&taskInfo), &infoCount) == KERN_SUCCESS) {
+     residentBytes = static_cast<double>(taskInfo.resident_size);
++    nativeHeapBytes = residentBytes;
+   }
+ 
+-  // Get system-wide memory pressure
+   vm_statistics64_data_t vmStats;
+   mach_msg_type_number_t vmCount = HOST_VM_INFO64_COUNT;
+   if (host_statistics64(mach_host_self(), HOST_VM_INFO64,
+-                        (host_info64_t)&vmStats, &vmCount) == KERN_SUCCESS) {
++                        reinterpret_cast<host_info64_t>(&vmStats), &vmCount) == KERN_SUCCESS) {
+     vm_size_t pageSize;
+     host_page_size(mach_host_self(), &pageSize);
+     availableMemoryBytes = static_cast<double>(vmStats.free_count) * pageSize;
+-    // Consider low memory if free pages < 10% of total active+inactive+free
+     uint64_t totalPages = vmStats.active_count + vmStats.inactive_count + vmStats.free_count;
+     isLowMemory = (totalPages > 0) &&
+                   (static_cast<double>(vmStats.free_count) / totalPages < 0.1);
+   }
+-
+-  // malloc_size is per-allocation; use resident_size as native heap proxy
+-  nativeHeapBytes = residentBytes;
+-#endif
+-
+-#ifdef __ANDROID__
+-  // Parse /proc/self/status for VmRSS (resident set size)
+-  std::ifstream statusFile("/proc/self/status");
+-  if (statusFile.is_open()) {
+-    std::string line;
+-    while (std::getline(statusFile, line)) {
+-      if (line.rfind("VmRSS:", 0) == 0) {
+-        // Format: "VmRSS:    123456 kB"
+-        std::istringstream iss(line.substr(6));
+-        double kbValue = 0;
+-        iss >> kbValue;
+-        residentBytes = kbValue * 1024.0;
+-        break;
+-      }
+-    }
+-  }
+-
+-  // Use mallinfo for native heap
+-  struct mallinfo mi = mallinfo();
+-  nativeHeapBytes = static_cast<double>(mi.uordblks); // total allocated space
+-
+-  // Parse /proc/meminfo for available memory
+-  std::ifstream memFile("/proc/meminfo");
+-  if (memFile.is_open()) {
+-    std::string line;
+-    while (std::getline(memFile, line)) {
+-      if (line.rfind("MemAvailable:", 0) == 0) {
+-        std::istringstream iss(line.substr(13));
+-        double kbValue = 0;
+-        iss >> kbValue;
+-        availableMemoryBytes = kbValue * 1024.0;
+-        break;
+-      }
+-    }
+-  }
+-
+-  // Consider low if available < 256MB
+-  isLowMemory = availableMemoryBytes > 0 && availableMemoryBytes < 256.0 * 1024 * 1024;
+ #endif
+ 
+   return MemoryUsage{nativeHeapBytes, residentBytes, availableMemoryBytes, isLowMemory};
+ }
+ 
+ //------------------------------------------------------------------------------
+-// close - Release all native resources
++// close
+ //------------------------------------------------------------------------------
+ void HybridLiteRTLM::close() {
+   std::lock_guard<std::mutex> lock(mutex_);
+-  
+-#ifdef LITERT_LM_ENABLED
+-  // Release in reverse order of creation
+-  conversation_.reset();
+-  engine_.reset();
+-#endif
+-  
+   isLoaded_ = false;
+   history_.clear();
++  LiteRTLMBridgeClose();
+ }
+ 
+ } // namespace margelo::nitro::litertlm
+diff --git a/node_modules/react-native-litert-lm/cpp/HybridLiteRTLM.hpp b/node_modules/react-native-litert-lm/cpp/HybridLiteRTLM.hpp
+index 6f85793..9ccaaa7 100644
+--- a/node_modules/react-native-litert-lm/cpp/HybridLiteRTLM.hpp
++++ b/node_modules/react-native-litert-lm/cpp/HybridLiteRTLM.hpp
+@@ -2,34 +2,18 @@
+ // HybridLiteRTLM.hpp
+ // react-native-litert-lm
+ //
+-// High-performance LLM inference using LiteRT-LM.
+-// Supports Gemma 3n and other .litertlm models.
+-//
+-// NOTE: This C++ implementation is used for iOS ONLY.
+-// Android uses the Kotlin implementation in `android/src/main/java/com/margelo/nitro/dev/litert/litertlm/HybridLiteRTLM.kt`.
+-// Do not assume changes here will affect Android.
++// iOS implementation that bridges to LiteRTLMBridge.swift (Google LiteRT-LM SDK).
++// Android uses the Kotlin implementation.
+ //
+ 
+ #pragma once
+ 
+ #include "../nitrogen/generated/shared/c++/HybridLiteRTLMSpec.hpp"
+ 
+-// LiteRT-LM headers (conditionally included when available via Prefab/CMake)
+-#ifdef LITERT_LM_ENABLED
+-#include "litert/lm/engine.h"
+-#include "litert/lm/conversation.h"
+-#include "litert/lm/types.h"
+-#endif
+-
+-// Memory usage headers
+ #ifdef __APPLE__
+ #include <mach/mach.h>
+ #include <mach/mach_host.h>
+ #endif
+-#ifdef __ANDROID__
+-#include <malloc.h>
+-#include <fstream>
+-#endif
+ 
+ #include <string>
+ #include <optional>
+@@ -37,14 +21,17 @@
+ #include <memory>
+ #include <mutex>
+ #include <functional>
++#include <thread>
++#include <chrono>
+ 
+ namespace margelo::nitro::litertlm {
+ 
+ /**
+- * HybridLiteRTLM: React Native bindings for LiteRT-LM.
++ * HybridLiteRTLM — iOS real implementation.
+  *
+- * Wraps LiteRT-LM's Engine and Conversation classes to provide
+- * high-level LLM inference with GPU acceleration.
++ * Delegates to LiteRTLMBridge.swift (official Google LiteRT-LM Swift SDK)
++ * via a thin C-style ObjC bridge (HybridLiteRTLMBridge.h/.mm).
++ * Android uses the Kotlin implementation in HybridLiteRTLM.kt.
+  */
+ class HybridLiteRTLM : public HybridLiteRTLMSpec {
+ public:
+@@ -54,32 +41,38 @@ public:
+     close();
+   }
+ 
+-  // Prevent copying
+   HybridLiteRTLM(const HybridLiteRTLM&) = delete;
+   HybridLiteRTLM& operator=(const HybridLiteRTLM&) = delete;
+ 
+ public:
+-  // HybridLiteRTLMSpec interface implementation
++  // HybridLiteRTLMSpec interface — all signatures match the generated spec.
++
++  std::shared_ptr<Promise<void>> loadModel(
++      const std::string& modelPath,
++      const std::optional<LLMConfig>& config) override;
+ 
+-  void loadModel(const std::string& modelPath, 
+-                 const std::optional<LLMConfig>& config) override;
++  std::shared_ptr<Promise<std::string>> sendMessage(
++      const std::string& message) override;
+ 
+-  std::string sendMessage(const std::string& message) override;
++  std::shared_ptr<Promise<std::string>> sendMessageWithImage(
++      const std::string& message,
++      const std::string& imagePath) override;
+ 
+-  std::string sendMessageWithImage(const std::string& message,
+-                                   const std::string& imagePath) override;
++  std::shared_ptr<Promise<std::string>> downloadModel(
++      const std::string& url,
++      const std::string& fileName,
++      const std::optional<std::function<void(double)>>& onProgress) override;
+ 
+-  std::future<std::string> downloadModel(const std::string& url, 
+-                                         const std::string& fileName,
+-                                         const std::optional<std::function<void(double)>>& onProgress) override;
++  std::shared_ptr<Promise<void>> deleteModel(
++      const std::string& fileName) override;
+ 
+-  std::string sendMessageWithAudio(const std::string& message,
+-                                   const std::string& audioPath) override;
++  std::shared_ptr<Promise<std::string>> sendMessageWithAudio(
++      const std::string& message,
++      const std::string& audioPath) override;
+ 
+   void sendMessageAsync(
+-    const std::string& message,
+-    const std::function<void(std::string, bool)>& onToken
+-  ) override;
++      const std::string& message,
++      const std::function<void(const std::string& /* token */, bool /* done */)>& onToken) override;
+ 
+   std::vector<Message> getHistory() override;
+ 
+@@ -94,43 +87,24 @@ public:
+   void close() override;
+ 
+ private:
+-  // LiteRT-LM resources (conditionally available on Android with Prefab)
+-#ifdef LITERT_LM_ENABLED
+-  std::unique_ptr<litert::lm::Engine> engine_;
+-  std::unique_ptr<litert::lm::Conversation> conversation_;
+-#endif
+-  
+-  // State
+   bool isLoaded_ = false;
+   std::vector<Message> history_;
+   GenerationStats lastStats_{0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+-  
+-  // Thread safety
+   mutable std::mutex mutex_;
+ 
+-  // Configuration - backends
++  // Configuration
+   Backend backend_ = Backend::GPU;
+-  Backend visionBackend_ = Backend::GPU;  // Gemma 3n requires GPU for vision
+-  Backend audioBackend_ = Backend::CPU;   // Audio typically CPU
+-  
+-  // Configuration - sampling parameters
+   double temperature_ = 0.7;
+   double topK_ = 40.0;
+   double topP_ = 0.95;
+   double maxTokens_ = 1024.0;
++  std::string systemPrompt_;
+ 
+-  // Helper to ensure model is loaded
+   void ensureLoaded() const {
+     if (!isLoaded_) {
+       throw std::runtime_error("LiteRTLM: No model loaded. Call loadModel() first.");
+     }
+   }
+-  
+-  // Helper to format a message for the engine (apply chat template if needed)
+-  std::string formatUserPrompt(const std::string& message) const;
+-  
+-  // Helper to create a new conversation from existing engine
+-  void createNewConversation();
+ };
+ 
+ } // namespace margelo::nitro::litertlm
+diff --git a/node_modules/react-native-litert-lm/cpp/HybridLiteRTLM.mm b/node_modules/react-native-litert-lm/cpp/HybridLiteRTLM.mm
+new file mode 100644
+index 0000000..9bc27cd
+--- /dev/null
++++ b/node_modules/react-native-litert-lm/cpp/HybridLiteRTLM.mm
+@@ -0,0 +1,304 @@
++// HybridLiteRTLM.mm
++// react-native-litert-lm
++//
++// iOS ObjC++ implementation that delegates to LiteRTLMBridge (Swift/LiteRT-LM SDK).
++// Compiled as Objective-C++ (.mm) so ObjC blocks and C++ can coexist.
++// Android uses the Kotlin implementation.
++//
++
++#import <Foundation/Foundation.h>
++
++#include "HybridLiteRTLM.hpp"
++#include "HybridLiteRTLMBridge.h"
++
++#include <stdexcept>
++#include <sstream>
++
++namespace margelo::nitro::litertlm {
++
++//------------------------------------------------------------------------------
++// loadModel — delegate to Swift bridge
++//------------------------------------------------------------------------------
++std::shared_ptr<Promise<void>> HybridLiteRTLM::loadModel(
++    const std::string& modelPath,
++    const std::optional<LLMConfig>& config) {
++
++  if (config.has_value()) {
++    std::lock_guard<std::mutex> lock(mutex_);
++    if (config->backend.has_value())     backend_     = config->backend.value();
++    if (config->temperature.has_value()) temperature_ = config->temperature.value();
++    if (config->topK.has_value())        topK_        = config->topK.value();
++    if (config->topP.has_value())        topP_        = config->topP.value();
++    if (config->maxTokens.has_value())   maxTokens_   = config->maxTokens.value();
++    if (config->systemPrompt.has_value()) systemPrompt_ = config->systemPrompt.value();
++  }
++
++  bool useGPU = (backend_ == Backend::GPU);
++  std::string path = modelPath;
++
++  return Promise<void>::async([this, path, useGPU]() {
++    // LiteRTLMBridgeLoadModel is fully synchronous: blocks internally and
++    // calls our completion block BEFORE returning.
++    __block NSString* errNS = nil;
++
++    LiteRTLMBridgeLoadModel(path.c_str(), useGPU, ^(const char* err) {
++      if (err) errNS = @(err);  // @(cStr) creates NSString from C string
++    });
++    // Bridge has returned; loading is complete.
++
++    if (errNS) {
++      throw std::runtime_error(std::string("loadModel failed: ") + errNS.UTF8String);
++    }
++
++    std::lock_guard<std::mutex> lock(mutex_);
++    isLoaded_ = true;
++    history_.clear();
++  });
++}
++
++//------------------------------------------------------------------------------
++// sendMessage — blocking, delegate to bridge
++//------------------------------------------------------------------------------
++std::shared_ptr<Promise<std::string>> HybridLiteRTLM::sendMessage(
++    const std::string& message) {
++
++  std::string prompt = message;  // capture by value for the async lambda
++
++  return Promise<std::string>::async([this, prompt]() -> std::string {
++    {
++      std::lock_guard<std::mutex> lock(mutex_);
++      ensureLoaded();
++    }
++
++    // LiteRTLMBridgeSendMessage is fully synchronous: blocks internally and
++    // calls our completion block BEFORE returning.
++    __block NSString* resultNS = nil;
++    __block NSString* errNS = nil;
++
++    LiteRTLMBridgeSendMessage(prompt.c_str(), ^(const char* text, const char* err) {
++      if (text) resultNS = @(text);
++      if (err)  errNS    = @(err);
++    });
++    // Bridge has returned.
++
++    if (errNS) {
++      throw std::runtime_error(std::string("sendMessage failed: ") + errNS.UTF8String);
++    }
++
++    std::string response = resultNS ? std::string(resultNS.UTF8String) : "";
++
++    std::lock_guard<std::mutex> lock(mutex_);
++    Message userMsg;
++    userMsg.role = Role::USER;
++    userMsg.content = prompt;
++    history_.push_back(userMsg);
++    Message modelMsg;
++    modelMsg.role = Role::MODEL;
++    modelMsg.content = response;
++    history_.push_back(modelMsg);
++
++    return response;
++  });
++}
++
++//------------------------------------------------------------------------------
++// sendMessageWithImage — Not supported on iOS.
++//------------------------------------------------------------------------------
++std::shared_ptr<Promise<std::string>> HybridLiteRTLM::sendMessageWithImage(
++    const std::string& /* message */,
++    const std::string& /* imagePath */) {
++
++  return Promise<std::string>::rejected(
++      std::make_exception_ptr(std::runtime_error(
++          "sendMessageWithImage is not yet supported on iOS.")));
++}
++
++//------------------------------------------------------------------------------
++// downloadModel — Not supported via this API on iOS.
++//------------------------------------------------------------------------------
++std::shared_ptr<Promise<std::string>> HybridLiteRTLM::downloadModel(
++    const std::string& /* url */,
++    const std::string& /* fileName */,
++    const std::optional<std::function<void(double)>>& /* onProgress */) {
++
++  return Promise<std::string>::rejected(
++      std::make_exception_ptr(std::runtime_error(
++          "downloadModel is not supported on iOS via react-native-litert-lm. "
++          "Use expo-file-system to download models.")));
++}
++
++//------------------------------------------------------------------------------
++// deleteModel — Not supported on iOS.
++//------------------------------------------------------------------------------
++std::shared_ptr<Promise<void>> HybridLiteRTLM::deleteModel(
++    const std::string& /* fileName */) {
++
++  return Promise<void>::rejected(
++      std::make_exception_ptr(std::runtime_error(
++          "deleteModel is not supported on iOS.")));
++}
++
++//------------------------------------------------------------------------------
++// sendMessageWithAudio — Not supported on iOS.
++//------------------------------------------------------------------------------
++std::shared_ptr<Promise<std::string>> HybridLiteRTLM::sendMessageWithAudio(
++    const std::string& /* message */,
++    const std::string& /* audioPath */) {
++
++  return Promise<std::string>::rejected(
++      std::make_exception_ptr(std::runtime_error(
++          "sendMessageWithAudio is not yet supported on iOS.")));
++}
++
++//------------------------------------------------------------------------------
++// sendMessageAsync — Streaming via LiteRTLMBridge
++//------------------------------------------------------------------------------
++void HybridLiteRTLM::sendMessageAsync(
++    const std::string& message,
++    const std::function<void(const std::string& /* token */, bool /* done */)>& onToken) {
++
++  {
++    std::lock_guard<std::mutex> lock(mutex_);
++    ensureLoaded();
++  }
++
++  std::string prompt = message;
++
++  // Add user message to history before streaming
++  {
++    std::lock_guard<std::mutex> lock(mutex_);
++    Message userMsg;
++    userMsg.role = Role::USER;
++    userMsg.content = prompt;
++    history_.push_back(userMsg);
++  }
++
++  // Capture onToken for use in ObjC block.
++  // ObjC blocks can't mutate captured C++ objects directly — use shared_ptr wrappers
++  // so the block holds a pointer it can freely dereference and modify.
++  auto spFullResponse  = std::make_shared<std::string>();
++  auto spTokenCallback = std::make_shared<std::function<void(const std::string&, bool)>>(onToken);
++
++  __block std::string errorMsg;
++
++  // Capture raw pointers from shared_ptrs for the block.
++  // Lifetime is safe: bridge is synchronous, all callbacks fire before it returns.
++  std::string* pFullResponse  = spFullResponse.get();
++  auto*        pTokenCallback = spTokenCallback.get();
++
++  LiteRTLMBridgeSendMessageAsync(
++    prompt.c_str(),
++    ^(const char* token) {
++      // Called for each streamed token
++      if (token && token[0] != '\0') {
++        *pFullResponse += token;
++        (*pTokenCallback)(std::string(token), false);
++      }
++    },
++    ^(const char* err) {
++      // Called when streaming completes (err is null on success)
++      if (err) errorMsg = std::string(err);
++    }
++  );
++
++  // LiteRTLMBridgeSendMessageAsync is fully synchronous: it blocks internally
++  // via DispatchSemaphore until all tokens are streamed, then returns.
++  // All onToken callbacks have already fired before this line is reached.
++
++  // Signal end of stream to JS
++  if (errorMsg.empty()) {
++    (*pTokenCallback)("", true);  // done signal
++
++    std::lock_guard<std::mutex> lock(mutex_);
++    Message modelMsg;
++    modelMsg.role = Role::MODEL;
++    modelMsg.content = *spFullResponse;
++    history_.push_back(modelMsg);
++  } else {
++    // Surface the native error to JS instead of silently reporting 0 tokens.
++    (*pTokenCallback)(std::string("[Native error] ") + errorMsg, false);
++    (*pTokenCallback)("", true);
++    // Remove the user message we added since generation failed
++    std::lock_guard<std::mutex> lock(mutex_);
++    if (!history_.empty()) history_.pop_back();
++  }
++}
++
++//------------------------------------------------------------------------------
++// getHistory
++//------------------------------------------------------------------------------
++std::vector<Message> HybridLiteRTLM::getHistory() {
++  std::lock_guard<std::mutex> lock(mutex_);
++  return history_;
++}
++
++//------------------------------------------------------------------------------
++// resetConversation
++//------------------------------------------------------------------------------
++void HybridLiteRTLM::resetConversation() {
++  std::lock_guard<std::mutex> lock(mutex_);
++  history_.clear();
++  LiteRTLMBridgeResetConversation();
++}
++
++//------------------------------------------------------------------------------
++// isReady
++//------------------------------------------------------------------------------
++bool HybridLiteRTLM::isReady() {
++  std::lock_guard<std::mutex> lock(mutex_);
++  return isLoaded_ && LiteRTLMBridgeIsReady();
++}
++
++//------------------------------------------------------------------------------
++// getStats
++//------------------------------------------------------------------------------
++GenerationStats HybridLiteRTLM::getStats() {
++  std::lock_guard<std::mutex> lock(mutex_);
++  return lastStats_;
++}
++
++//------------------------------------------------------------------------------
++// getMemoryUsage — Real OS-level memory query on Apple platforms.
++//------------------------------------------------------------------------------
++MemoryUsage HybridLiteRTLM::getMemoryUsage() {
++  double nativeHeapBytes = 0;
++  double residentBytes = 0;
++  double availableMemoryBytes = 0;
++  bool isLowMemory = false;
++
++#ifdef __APPLE__
++  struct mach_task_basic_info taskInfo;
++  mach_msg_type_number_t infoCount = MACH_TASK_BASIC_INFO_COUNT;
++  if (task_info(mach_task_self(), MACH_TASK_BASIC_INFO,
++                reinterpret_cast<task_info_t>(&taskInfo), &infoCount) == KERN_SUCCESS) {
++    residentBytes = static_cast<double>(taskInfo.resident_size);
++    nativeHeapBytes = residentBytes;
++  }
++
++  vm_statistics64_data_t vmStats;
++  mach_msg_type_number_t vmCount = HOST_VM_INFO64_COUNT;
++  if (host_statistics64(mach_host_self(), HOST_VM_INFO64,
++                        reinterpret_cast<host_info64_t>(&vmStats), &vmCount) == KERN_SUCCESS) {
++    vm_size_t pageSize;
++    host_page_size(mach_host_self(), &pageSize);
++    availableMemoryBytes = static_cast<double>(vmStats.free_count) * pageSize;
++    uint64_t totalPages = vmStats.active_count + vmStats.inactive_count + vmStats.free_count;
++    isLowMemory = (totalPages > 0) &&
++                  (static_cast<double>(vmStats.free_count) / totalPages < 0.1);
++  }
++#endif
++
++  return MemoryUsage{nativeHeapBytes, residentBytes, availableMemoryBytes, isLowMemory};
++}
++
++//------------------------------------------------------------------------------
++// close
++//------------------------------------------------------------------------------
++void HybridLiteRTLM::close() {
++  std::lock_guard<std::mutex> lock(mutex_);
++  isLoaded_ = false;
++  history_.clear();
++  LiteRTLMBridgeClose();
++}
++
++} // namespace margelo::nitro::litertlm
+diff --git a/node_modules/react-native-litert-lm/cpp/HybridLiteRTLMBridge.h b/node_modules/react-native-litert-lm/cpp/HybridLiteRTLMBridge.h
+new file mode 100644
+index 0000000..d5a76bf
+--- /dev/null
++++ b/node_modules/react-native-litert-lm/cpp/HybridLiteRTLMBridge.h
+@@ -0,0 +1,53 @@
++//
++// HybridLiteRTLMBridge.h
++// react-native-litert-lm
++//
++// C-callable bridge from HybridLiteRTLM.cpp (C++) to LiteRTLMBridge.swift.
++// Implemented in HybridLiteRTLMBridge.mm (Objective-C++).
++//
++
++#pragma once
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++#include <stdbool.h>
++
++/// Load a model from the given path. Calls completion on the calling thread when done.
++/// @param modelPath  Absolute path to a .litertlm file.
++/// @param useGPU     true = Metal GPU backend, false = CPU.
++/// @param completion Called with NULL on success, or a C-string error message on failure.
++void LiteRTLMBridgeLoadModel(
++    const char* modelPath,
++    bool useGPU,
++    void (^completion)(const char* __nullable errorMessage));
++
++/// Send a message and get the full response synchronously.
++/// @param prompt      The user message text.
++/// @param completion  Called with (responseText, NULL) on success, or (NULL, errorMessage) on failure.
++void LiteRTLMBridgeSendMessage(
++    const char* prompt,
++    void (^completion)(const char* __nullable responseText, const char* __nullable errorMessage));
++
++/// Send a message with streaming token callbacks.
++/// @param prompt       The user message text.
++/// @param onToken      Called with each token string (non-null, non-empty).
++/// @param onComplete   Called when streaming ends. NULL errorMessage = success.
++void LiteRTLMBridgeSendMessageAsync(
++    const char* prompt,
++    void (^onToken)(const char* __nonnull token),
++    void (^onComplete)(const char* __nullable errorMessage));
++
++/// Returns true if the engine and conversation are initialized.
++bool LiteRTLMBridgeIsReady(void);
++
++/// Reset the conversation (clears KV cache, keeps engine loaded).
++void LiteRTLMBridgeResetConversation(void);
++
++/// Close the engine and release GPU/CPU memory.
++void LiteRTLMBridgeClose(void);
++
++#ifdef __cplusplus
++}
++#endif
+diff --git a/node_modules/react-native-litert-lm/ios/HybridLiteRTLMBridge.mm b/node_modules/react-native-litert-lm/ios/HybridLiteRTLMBridge.mm
+new file mode 100644
+index 0000000..4a569d7
+--- /dev/null
++++ b/node_modules/react-native-litert-lm/ios/HybridLiteRTLMBridge.mm
+@@ -0,0 +1,134 @@
++//
++// HybridLiteRTLMBridge.mm
++// react-native-litert-lm
++//
++// C-bridge implementation using the ObjC runtime to call LiteRTLMBridge.swift
++// (which lives in the NanoChat app target).
++//
++// We use objc_msgSend to call the @objc-annotated methods on LiteRTLMBridge at runtime,
++// so there is NO compile-time dependency on the app target's Swift-generated headers.
++// This is the standard pattern for plugin/pod → host-app communication on iOS.
++//
++
++#import "HybridLiteRTLMBridge.h"
++
++#import <Foundation/Foundation.h>
++#import <objc/runtime.h>
++#import <objc/message.h>
++
++// ---------------------------------------------------------------------------
++// Helper: Get the LiteRTLMBridge singleton (defined in LiteRTLMBridge.swift)
++// ---------------------------------------------------------------------------
++static id _Nullable getSharedBridge(void) {
++  // LiteRTLMBridge is an @objc class, so it's registered in the ObjC runtime.
++  Class cls = objc_getClass("LiteRTLMBridge");
++  if (!cls) {
++    NSLog(@"[LiteRTLMBridge] ERROR: LiteRTLMBridge class not found in ObjC runtime. "
++          @"Make sure LiteRTLMBridge.swift is compiled into the app target.");
++    return nil;
++  }
++  // Call [LiteRTLMBridge shared] — a class property, maps to +shared selector.
++  return ((id (*)(id, SEL))objc_msgSend)(cls, NSSelectorFromString(@"shared"));
++}
++
++// ---------------------------------------------------------------------------
++// Function pointer typedefs matching LiteRTLMBridge's @objc method signatures
++// ---------------------------------------------------------------------------
++
++// - (void)loadModelWithModelPath:(NSString*)path useGPU:(BOOL)useGPU completion:(void(^)(NSError*))completion;
++typedef void (*LoadModelIMP)(id, SEL, NSString*, BOOL, void(^)(NSError* _Nullable));
++
++// - (void)sendMessageWithPrompt:(NSString*)prompt completion:(void(^)(NSString*, NSError*))completion;
++typedef void (*SendMessageIMP)(id, SEL, NSString*, void(^)(NSString* _Nullable, NSError* _Nullable));
++
++// - (void)sendMessageAsyncWithPrompt:(NSString*)prompt onToken:(void(^)(NSString*))onToken onComplete:(void(^)(id, NSError*))onComplete;
++typedef void (*SendMessageAsyncIMP)(id, SEL, NSString*, void(^)(NSString*), void(^)(id _Nullable, NSError* _Nullable));
++
++// - (BOOL)isReady;
++typedef BOOL (*IsReadyIMP)(id, SEL);
++
++// - (void)resetConversation;
++typedef void (*ResetConversationIMP)(id, SEL);
++
++// - (void)close;
++typedef void (*CloseIMP)(id, SEL);
++
++// ---------------------------------------------------------------------------
++// Bridge function implementations
++// ---------------------------------------------------------------------------
++
++void LiteRTLMBridgeLoadModel(
++    const char* modelPath,
++    bool useGPU,
++    void (^completion)(const char* _Nullable errorMessage))
++{
++  id bridge = getSharedBridge();
++  if (!bridge) { completion("LiteRTLMBridge not available"); return; }
++
++  NSString* path = [NSString stringWithUTF8String:modelPath ?: ""];
++  SEL sel = NSSelectorFromString(@"loadModelWithModelPath:useGPU:completion:");
++  LoadModelIMP imp = (LoadModelIMP)objc_msgSend;
++  imp(bridge, sel, path, (BOOL)useGPU, ^(NSError* error) {
++    completion(error ? error.localizedDescription.UTF8String : NULL);
++  });
++}
++
++void LiteRTLMBridgeSendMessage(
++    const char* prompt,
++    void (^completion)(const char* _Nullable responseText, const char* _Nullable errorMessage))
++{
++  id bridge = getSharedBridge();
++  if (!bridge) { completion(NULL, "LiteRTLMBridge not available"); return; }
++
++  NSString* promptStr = [NSString stringWithUTF8String:prompt ?: ""];
++  SEL sel = NSSelectorFromString(@"sendMessageWithPrompt:completion:");
++  SendMessageIMP imp = (SendMessageIMP)objc_msgSend;
++  imp(bridge, sel, promptStr, ^(NSString* text, NSError* error) {
++    completion(text ? text.UTF8String : NULL,
++               error ? error.localizedDescription.UTF8String : NULL);
++  });
++}
++
++void LiteRTLMBridgeSendMessageAsync(
++    const char* prompt,
++    void (^onToken)(const char* _Nonnull token),
++    void (^onComplete)(const char* _Nullable errorMessage))
++{
++  id bridge = getSharedBridge();
++  if (!bridge) { onComplete("LiteRTLMBridge not available"); return; }
++
++  NSString* promptStr = [NSString stringWithUTF8String:prompt ?: ""];
++  SEL sel = NSSelectorFromString(@"sendMessageAsyncWithPrompt:onToken:onComplete:");
++  SendMessageAsyncIMP imp = (SendMessageAsyncIMP)objc_msgSend;
++  imp(bridge, sel, promptStr,
++      ^(NSString* token) {
++        if (token.length > 0) onToken(token.UTF8String);
++      },
++      ^(id stats, NSError* error) {
++        onComplete(error ? error.localizedDescription.UTF8String : NULL);
++      });
++}
++
++bool LiteRTLMBridgeIsReady(void) {
++  id bridge = getSharedBridge();
++  if (!bridge) return false;
++  SEL sel = NSSelectorFromString(@"isReady");
++  IsReadyIMP imp = (IsReadyIMP)objc_msgSend;
++  return (bool)imp(bridge, sel);
++}
++
++void LiteRTLMBridgeResetConversation(void) {
++  id bridge = getSharedBridge();
++  if (!bridge) return;
++  SEL sel = NSSelectorFromString(@"resetConversation");
++  ResetConversationIMP imp = (ResetConversationIMP)objc_msgSend;
++  imp(bridge, sel);
++}
++
++void LiteRTLMBridgeClose(void) {
++  id bridge = getSharedBridge();
++  if (!bridge) return;
++  SEL sel = NSSelectorFromString(@"close");
++  CloseIMP imp = (CloseIMP)objc_msgSend;
++  imp(bridge, sel);
++}
+diff --git a/node_modules/react-native-litert-lm/ios/LiteRTLMRegister.mm b/node_modules/react-native-litert-lm/ios/LiteRTLMRegister.mm
+new file mode 100644
+index 0000000..8f1e52c
+--- /dev/null
++++ b/node_modules/react-native-litert-lm/ios/LiteRTLMRegister.mm
+@@ -0,0 +1,31 @@
++//
++// LiteRTLMRegister.mm
++// react-native-litert-lm
++//
++// Registers the C++ HybridLiteRTLM stub with the Nitro Modules HybridObjectRegistry.
++// Using Objective-C +load ensures this runs before main() and cannot be dead-stripped
++// by the iOS linker (unlike C++ static initializers / __attribute__((constructor))).
++//
++
++#import <Foundation/Foundation.h>
++#import <NitroModules/HybridObjectRegistry.hpp>
++#import "HybridLiteRTLM.hpp"
++
++using namespace margelo::nitro;
++using namespace margelo::nitro::litertlm;
++
++@interface LiteRTLMRegister : NSObject
++@end
++
++@implementation LiteRTLMRegister
++
+++ (void)load {
++  HybridObjectRegistry::registerHybridObjectConstructor(
++    "LiteRTLM",
++    []() -> std::shared_ptr<HybridObject> {
++      return std::make_shared<HybridLiteRTLM>();
++    }
++  );
++}
++
++@end
+diff --git a/node_modules/react-native-litert-lm/react-native-litert-lm.podspec b/node_modules/react-native-litert-lm/react-native-litert-lm.podspec
+index 96fc56e..8fedccb 100644
+--- a/node_modules/react-native-litert-lm/react-native-litert-lm.podspec
++++ b/node_modules/react-native-litert-lm/react-native-litert-lm.podspec
+@@ -15,13 +15,15 @@ Pod::Spec.new do |s|
+   s.swift_version = '5.0'
+ 
+   s.source_files = [
+-    # Implementation (C++)
+-    "cpp/**/*.{hpp,cpp}",
+-    # Autolinking (Objective-C++)
++    # Implementation (C++ and ObjC++) - exclude Android JNI entry point
++    "cpp/**/*.{hpp,cpp,mm}",
++    # Autolinking (Objective-C++) — LiteRTLMBridge.swift lives in the app target
+     "ios/**/*.{m,mm}",
+     # Nitrogen generated iOS bridge
+     "nitrogen/generated/ios/**/*.{mm,swift}",
+   ]
++  # Exclude the old pure-C++ file (replaced by HybridLiteRTLM.mm) and Android adapter
++  s.exclude_files = ["cpp/cpp-adapter.cpp", "cpp/HybridLiteRTLM.cpp"]
+ 
+   s.pod_target_xcconfig = {
+     'CLANG_CXX_LANGUAGE_STANDARD' => 'c++20',
+@@ -31,8 +33,8 @@ Pod::Spec.new do |s|
+       '"$(PODS_TARGET_SRCROOT)/nitrogen/generated/shared/c++"',
+       '"$(PODS_TARGET_SRCROOT)/nitrogen/generated/ios"',
+     ].join(' '),
+-    # Stub mode - LiteRT-LM iOS not yet available
+-    'GCC_PREPROCESSOR_DEFINITIONS' => '$(inherited) LITERT_LM_IOS_STUB=1',
++    # No LiteRTLM SDK dependency needed in the pod — bridge uses ObjC runtime
++    'GCC_PREPROCESSOR_DEFINITIONS' => '$(inherited)',
+   }
+ 
+   # Load nitrogen autolinking

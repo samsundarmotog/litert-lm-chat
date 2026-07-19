@@ -1,25 +1,32 @@
 {
   "expo": {
-    "name": "litert-lm-chat",
+    "name": "NanoChat",
     "slug": "litert-lm-chat",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
-    "userInterfaceStyle": "light",
+    "userInterfaceStyle": "dark",
+    "scheme": "nanochat",
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": false,
+      "bundleIdentifier": "com.nanochat.app.samsundar",
+      "deploymentTarget": "16.4",
+      "infoPlist": {
+        "NSPhotoLibraryUsageDescription": "NanoChat does not use your photo library."
+      }
     },
-    "android": {
-      "adaptiveIcon": {
-        "backgroundColor": "#E6F4FE",
-        "foregroundImage": "./assets/android-icon-foreground.png",
-        "backgroundImage": "./assets/android-icon-background.png",
-        "monochromeImage": "./assets/android-icon-monochrome.png"
-      },
-      "predictiveBackGestureEnabled": false
-    },
-    "web": {
-      "favicon": "./assets/favicon.png"
+    "plugins": [
+      "react-native-litert-lm",
+      [
+        "expo-file-system",
+        {}
+      ],
+      "./plugins/withFollyCoroutinesFix"
+    ],
+    "splash": {
+      "image": "./assets/icon.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#0A0A0F"
     }
   }
 }
